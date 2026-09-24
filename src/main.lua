@@ -67,6 +67,8 @@ local thumbs = {}
 local coverqueue, coverqueued = {}, {}
 local coverwait = {}
 local comicbusy = false -- a page slide or scroll is running in the comic view
+local settle = 0 -- seconds to keep drawing after window changes (see syncsize)
+local debuglog = os.getenv("LUAREADER_DEBUG") ~= nil
 local drag -- mouse drag in the comic view: { x, y, moved }
 
 local function theme() return themes[state.settings.theme] or themes.dark end
@@ -1347,6 +1349,10 @@ function love.load(args)
 	keys.normalize(state.settings.keys)
 	keymap = keys.map(state.settings.keys)
 	W, H = lg.getDimensions()
+	if debuglog then
+		print(("start %dx%d, pixels %dx%d, dpi scale %.2f, video driver %s"):format(W, H,
+			lg.getPixelWidth(), lg.getPixelHeight(), lg.getDPIScale(), tostring(os.getenv("SDL_VIDEODRIVER"))))
+	end
 	images.init()
 	loadfonts()
 	comic.init({
@@ -1422,6 +1428,7 @@ local function updatefast(dt)
 end
 
 function love.update(dt)
+	settle = max(0, settle - dt)
 	images.update()
 	updatecovers()
 	comicbusy = false
@@ -1448,7 +1455,23 @@ function love.update(dt)
 	end
 end
 
+-- Keeps W, H equal to the real drawable size. On some setups (scaled outputs,
+-- some SDL builds) the resize event carries a stale size, or the new size
+-- lands a moment later, so it's checked every frame rather than trusted.
+local function syncsize()
+	local w, h = lg.getDimensions()
+	if w ~= W or h ~= H then
+		if debuglog then
+			print(("size %dx%d (was %sx%s), pixels %dx%d, dpi scale %.2f"):format(w, h, tostring(W), tostring(H),
+				lg.getPixelWidth(), lg.getPixelHeight(), lg.getDPIScale()))
+		end
+		W, H = w, h
+		relayout()
+	end
+end
+
 function love.draw()
+	syncsize()
 	local th = theme()
 	lg.clear(unpack(th.bg))
 	ui.th = th
@@ -1471,12 +1494,18 @@ function love.draw()
 end
 
 function love.resize(w, h)
-	W, H = w, h
-	relayout()
+	if debuglog then print(("resize event %dx%d"):format(w, h)) end
+	settle = 0.75
+	syncsize()
 end
 
 function love.focus(f)
+	settle = 0.75
 	if not f then persist() end
+end
+
+function love.visible()
+	settle = 0.75
 end
 
 function love.quit()
@@ -1713,7 +1742,7 @@ function love.run()
 
 	return function()
 		local animating = toast ~= nil or autoscrolling() or (book and book.scroll ~= book.target)
-			or images.busy() or #coverqueue > 0 or next(coverwait) ~= nil or comicbusy
+			or images.busy() or #coverqueue > 0 or next(coverwait) ~= nil or comicbusy or settle > 0
 		if drawn and not animating then
 			local exit = handle(love.event.wait())
 			if exit then return exit end

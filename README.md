@@ -10,6 +10,10 @@ Or drop a file onto the window. The cog (top right, or `s`) opens settings:
 reading options, auto-scroll and the reading guide, and key bindings. `?` jumps
 straight to the keys.
 
+If the window looks wrong (content cut off or squeezed into a corner), run
+`LUAREADER_DEBUG=1 ./run.sh` from a terminal: it prints the window sizes the
+app sees, which helps track down display-scaling issues.
+
 ## Self-contained
 
 Everything lives in this directory:
