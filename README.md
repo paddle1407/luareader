@@ -26,9 +26,10 @@ Everything lives in this directory:
 - `src/fonts/` has Noto Serif, Noto Sans (SIL OFL) and DejaVu Serif (free license);
   their licenses are next to them.
 
-To launch it from rofi or another app launcher, fix the paths in `luareader.desktop`
-if the checkout isn't at `~/src/luareader`, then symlink it:
-`ln -s "$PWD/luareader.desktop" ~/.local/share/applications/`.
+To launch it from rofi or another app launcher, run `./desktop.sh --link`. Desktop
+entries need absolute paths, so git only has a template (`luareader.desktop.in`);
+the script writes `luareader.desktop` for wherever this checkout lives and
+symlinks it into `~/.local/share/applications/`. Run it again if you move the folder.
 
 To remove everything, delete that symlink (if you made one) and this directory.
 

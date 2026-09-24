@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=luareader
+GenericName=Book Reader
+Comment=Read novels and comics in .txt, .epub and .cbz
+Exec=@DIR@/run.sh %f
+Icon=@DIR@/luareader.svg
+Terminal=false
+Categories=Office;Viewer;
+Keywords=book;ebook;epub;novel;reader;comic;manga;cbz;
+MimeType=application/epub+zip;application/vnd.comicbook+zip;application/x-cbz;
