@@ -5,6 +5,8 @@ local text = {}
 local char, byte, floor = string.char, string.byte, math.floor
 
 function text.utf8char(cp)
+	-- Surrogates aren't characters on their own; LÖVE rejects them.
+	if cp >= 0xD800 and cp <= 0xDFFF then return "\239\191\189" end
 	if cp < 0x80 then
 		return char(cp)
 	elseif cp < 0x800 then
@@ -18,20 +20,34 @@ function text.utf8char(cp)
 	return "\239\191\189" -- U+FFFD
 end
 
+-- Length of the valid UTF-8 sequence starting at byte i, or nil if it's
+-- invalid. Strict like LÖVE's decoder: no overlongs, surrogates or > U+10FFFF.
+local function seqlen(s, i)
+	local c = byte(s, i)
+	if c < 0x80 then return 1 end
+	local len, lo, hi
+	if c >= 0xC2 and c <= 0xDF then len, lo, hi = 2, 0x80, 0xBF
+	elseif c == 0xE0 then len, lo, hi = 3, 0xA0, 0xBF
+	elseif c == 0xED then len, lo, hi = 3, 0x80, 0x9F
+	elseif c >= 0xE1 and c <= 0xEF then len, lo, hi = 3, 0x80, 0xBF
+	elseif c == 0xF0 then len, lo, hi = 4, 0x90, 0xBF
+	elseif c >= 0xF1 and c <= 0xF3 then len, lo, hi = 4, 0x80, 0xBF
+	elseif c == 0xF4 then len, lo, hi = 4, 0x80, 0x8F
+	else return nil end
+	local c2 = byte(s, i + 1)
+	if not c2 or c2 < lo or c2 > hi then return nil end
+	for j = i + 2, i + len - 1 do
+		local cc = byte(s, j)
+		if not cc or cc < 0x80 or cc > 0xBF then return nil end
+	end
+	return len
+end
+
 function text.isutf8(s)
 	local i, n = 1, #s
 	while i <= n do
-		local c = byte(s, i)
-		local len
-		if c < 0x80 then len = 1
-		elseif c >= 0xC2 and c <= 0xDF then len = 2
-		elseif c >= 0xE0 and c <= 0xEF then len = 3
-		elseif c >= 0xF0 and c <= 0xF4 then len = 4
-		else return false end
-		for j = i + 1, i + len - 1 do
-			local cc = byte(s, j)
-			if not cc or cc < 0x80 or cc > 0xBF then return false end
-		end
+		local len = seqlen(s, i)
+		if not len then return false end
 		i = i + len
 	end
 	return true
@@ -47,14 +63,27 @@ local cp1252 = {
 	[0x9E] = 0x017E, [0x9F] = 0x0178,
 }
 
--- Returns valid UTF-8, converting from Windows-1252 if needed. Strips a BOM.
+-- Returns valid UTF-8 and strips a BOM. Only the bytes that aren't valid UTF-8
+-- are converted (as Windows-1252), so a legacy file converts completely while a
+-- UTF-8 file with a stray byte keeps the rest of its text intact.
 function text.toutf8(s)
 	s = s:gsub("^\239\187\191", "")
 	if text.isutf8(s) then return s end
-	return (s:gsub("[\128-\255]", function(c)
-		local b = byte(c)
-		return text.utf8char(cp1252[b] or b)
-	end))
+	local out, i, run, n = {}, 1, 1, #s
+	while i <= n do
+		local len = seqlen(s, i)
+		if len then
+			i = i + len
+		else
+			if i > run then out[#out + 1] = s:sub(run, i - 1) end
+			local b = byte(s, i)
+			out[#out + 1] = text.utf8char(cp1252[b] or b)
+			i = i + 1
+			run = i
+		end
+	end
+	if run <= n then out[#out + 1] = s:sub(run) end
+	return table.concat(out)
 end
 
 local entities = {

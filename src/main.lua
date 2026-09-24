@@ -1,6 +1,8 @@
 -- luareader: a small, pretty novel reader for .txt and .epub files.
 
 local layout = require("lib.layout")
+local zip = require("lib.zip")
+local text = require("lib.text")
 local epub = require("lib.epub")
 local txt = require("lib.txt")
 local cbz = require("lib.cbz")
@@ -128,7 +130,9 @@ end
 
 -- Reader geometry and navigation ------------------------------------------------
 
-local function viewh() return H - MARGIN_TOP - MARGIN_BOTTOM end
+-- Kept positive even if a tiling layout squeezes the window below its minimum
+-- size: with a zero-height page, page turns would stop making progress.
+local function viewh() return max(60, H - MARGIN_TOP - MARGIN_BOTTOM) end
 
 local function bodylh() return floor(fonts.body.r:getHeight() * state.settings.lineheight) end
 
@@ -212,7 +216,7 @@ local function relayout()
 	auto.line, auto.anim = nil, nil
 	local b, frac
 	if book.laid then b, frac = position() end
-	book.colw = min(state.settings.width, W - 48)
+	book.colw = max(120, min(state.settings.width, W - 48))
 	book.laid = layout.build(book.doc.blocks, {
 		fonts = fonts, width = book.colw, size = state.settings.size,
 		lineheight = state.settings.lineheight, justify = state.settings.justify,
@@ -350,7 +354,7 @@ end
 local function makecover(p, loader)
 	local key = "cover|" .. p
 	coverwait[key] = p
-	images.get(key, loader)
+	images.get(key, loader, true)
 end
 
 -- Renders decoded covers into small thumbnails in the save dir, and scans
@@ -393,9 +397,12 @@ local function updatecovers()
 		local raw, method
 		local kind = p:lower():match("%.(%w+)$")
 		if kind == "epub" or kind == "cbz" then
-			local data = readfile(p)
-			local ok, r, m = pcall(kind == "epub" and epub.coverraw or cbz.coverraw, data or "")
-			if ok then raw, method = r, m end
+			local archive = zip.openfile(p)
+			if archive then
+				local ok, r, m = pcall(kind == "epub" and epub.coverraw or cbz.coverraw, archive)
+				if ok then raw, method = r, m end
+				archive.close()
+			end
 		end
 		if raw then makecover(p, function() return raw, method end) else entry.cover = false end
 	end
@@ -408,12 +415,18 @@ local function openbook(path)
 		showtoast("Can only open .txt, .epub and .cbz files")
 		return
 	end
-	local data, err = readfile(path)
-	local doc
-	if data then
-		local filename = path:match("([^/]+)$")
-		local ok, res, lerr = pcall(loaders[ext], data, filename)
+	local filename = path:match("([^/]+)$") or path
+	local doc, err, source
+	if ext == "txt" then
+		source, err = readfile(path)
+	else
+		-- EPUB and CBZ are read from disk as needed, not loaded whole.
+		source, err = zip.openfile(path)
+	end
+	if source then
+		local ok, res, lerr = pcall(loaders[ext], source, filename)
 		if not ok then err = res elseif not res then err = lerr else doc = res end
+		if not doc and ext ~= "txt" then source.close() end
 	end
 	if not doc then
 		showtoast("Could not open book: " .. tostring(err))
@@ -421,13 +434,14 @@ local function openbook(path)
 	end
 
 	persist()
+	if book and book.doc.close then book.doc.close() end
 	images.clear()
 	book = { path = path, doc = doc, scroll = 0, target = 0 }
 	auto.on, auto.paused, fast.on = false, false, false
 
 	local entry = state.books[path] or {}
 	state.books[path] = entry
-	entry.title = doc.title or path:match("([^/]+)$")
+	entry.title = doc.title or text.toutf8(filename)
 	entry.author = doc.author
 	entry.opened = os.time()
 	if doc.comic then
@@ -436,7 +450,8 @@ local function openbook(path)
 		relayout()
 		if entry.block then gotoblock(entry.block, entry.frac, true) end
 	end
-	if entry.cover == nil and doc.imageraw then
+	-- Also retries books marked "no cover", in case a cover was lost earlier.
+	if type(entry.cover) ~= "string" and doc.imageraw then
 		local src = doc.cover
 		if not src and doc.blocks[1] and doc.blocks[1].kind == "image" then src = doc.blocks[1].src end
 		if src then makecover(path, function() return doc.imageraw(src) end) else entry.cover = false end
@@ -447,10 +462,12 @@ local function openbook(path)
 	screen, overlay = "reader", nil
 	love.window.setTitle(entry.title .. " — luareader")
 	persist()
+	if doc.warning then showtoast(doc.warning) end
 end
 
 local function closebook()
 	persist()
+	if book.doc.close then book.doc.close() end
 	images.clear()
 	book = nil
 	auto.on, auto.paused, fast.on = false, false, false
@@ -679,8 +696,12 @@ end
 
 local function faststart()
 	if not book then return end
-	if auto.on then autostop() end
 	buildwords()
+	if #book.words == 0 then
+		showtoast("There's no text here for the fast reader")
+		return
+	end
+	if auto.on then autostop() end
 	local b, frac = position()
 	local i = book.blockword[b]
 	i = i + floor(frac * (book.blockword[b + 1] - i))
@@ -1055,17 +1076,17 @@ local function drawlibrary()
 		else
 			color(th.fg, 0.07)
 			lg.rectangle("fill", tx, ty, tw, tht, 3, 3)
-			local initial = (b.entry.title or "?"):match("[%z\1-\127\194-\244][\128-\191]*") or "?"
+			local initial = text.toutf8(b.entry.title or "?"):match("[%z\1-\127\194-\244][\128-\191]*") or "?"
 			ui.label(initial, tx, ty, tw, tht, fonts.item, th.accent)
 		end
 
 		local lx, lw = x0 + tw + 16, cw - tw - 16
 		color(th.fg)
 		lg.setFont(fonts.item)
-		lg.print(ellipsize(fonts.item, b.entry.title or b.path, lw - 60), lx, y + 12)
+		lg.print(ellipsize(fonts.item, text.toutf8(b.entry.title or b.path), lw - 60), lx, y + 12)
 		color(th.dim)
 		lg.setFont(fonts.ui)
-		local sub = b.entry.author or b.path:match("([^/]+)$")
+		local sub = text.toutf8(b.entry.author or b.path:match("([^/]+)$") or b.path)
 		lg.print(ellipsize(fonts.ui, sub, lw - 60), lx, y + 40)
 		lg.printf(floor((b.entry.progress or 0) * 100 + 0.5) .. "%", x0, y + 40, cw, "right")
 		color(th.dim, 0.2)

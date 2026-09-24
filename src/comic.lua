@@ -22,7 +22,8 @@ local function fitwidth() return ctx.settings().comicfit == "width" end
 
 local function area()
 	local W, H = lg.getDimensions()
-	return PAD, PAD, W - PAD * 2, H - PAD - FOOT
+	-- Never zero or negative, even if a tiling layout squeezes the window.
+	return PAD, PAD, max(40, W - PAD * 2), max(40, H - PAD - FOOT)
 end
 
 -- The cover alone, then pairs, when spreads are on and the window is wide.

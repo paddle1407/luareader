@@ -23,6 +23,7 @@ end
 local void = { br = true, hr = true, img = true, meta = true, link = true, input = true }
 
 function xml.parse(s)
+	s = text.toutf8(s) -- books in legacy encodings, or with a stray byte, stay readable
 	local root = { tag = "#root", attrs = {}, children = {} }
 	local stack = { root }
 	local pos, n = 1, #s
@@ -51,7 +52,21 @@ function xml.parse(s)
 			local e = s:find(">", lt, true)
 			pos = e and e + 1 or n + 1
 		else
-			local gt = s:find(">", lt, true)
+			-- The tag ends at the first ">" outside a quoted attribute value.
+			local gt
+			local j = lt + 1
+			while true do
+				local k = s:find("[>\"']", j)
+				if not k then break end
+				local c = s:sub(k, k)
+				if c == ">" then
+					gt = k
+					break
+				end
+				local close = s:find(c, k + 1, true)
+				if not close then break end
+				j = close + 1
+			end
 			if not gt then break end
 			local inner = s:sub(lt + 1, gt - 1)
 			pos = gt + 1

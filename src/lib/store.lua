@@ -57,7 +57,23 @@ function store.save(data)
 	local out = { "return " }
 	serialize(data, "", out)
 	out[#out + 1] = "\n"
-	love.filesystem.write(FILE, table.concat(out))
+	local content = table.concat(out)
+
+	-- Write a temporary file and rename it over the old one: a rename is atomic,
+	-- so a crash mid-save can't leave a half-written state (and lose every
+	-- reading position). The first save has nothing to lose and also creates
+	-- the save directory, so it goes through love.filesystem.
+	if love.filesystem.getInfo(FILE) then
+		local path = love.filesystem.getSaveDirectory() .. "/" .. FILE
+		local f = io.open(path .. ".tmp", "wb")
+		if f then
+			local ok = f:write(content)
+			f:close()
+			if ok and os.rename(path .. ".tmp", path) then return end
+			os.remove(path .. ".tmp")
+		end
+	end
+	love.filesystem.write(FILE, content)
 end
 
 return store

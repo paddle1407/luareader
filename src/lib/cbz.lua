@@ -1,19 +1,25 @@
 -- CBZ (zipped comic) loader. Produces the common document shape with every
 -- block an image, plus doc.comic = true and doc.pages = { { src, block } ... }.
 -- Nothing is decoded here, so even huge comics open instantly.
+-- Loaders take an archive from lib/zip; doc.close() releases it.
 
-local zip = require("lib.zip")
 local xml = require("lib.xml")
+local text = require("lib.text")
 
 local cbz = {}
 
+-- What LÖVE can decode, and common page formats it can't (reported, not shown).
 local imageext = { png = true, jpg = true, jpeg = true, bmp = true }
+local unsupported = { webp = true, gif = true, avif = true, jxl = true }
 
-local function ispage(name)
-	if name:sub(-1) == "/" or name:find("__MACOSX/", 1, true) then return false end
+-- "page", "unsupported" or nil for a zip entry.
+local function pagekind(name)
+	if name:sub(-1) == "/" or name:find("__MACOSX/", 1, true) then return nil end
 	local base = name:match("([^/]+)$") or name
-	if base:sub(1, 1) == "." then return false end
-	return imageext[(base:match("%.(%w+)$") or ""):lower()] == true
+	if base:sub(1, 1) == "." then return nil end
+	local ext = (base:match("%.(%w+)$") or ""):lower()
+	if imageext[ext] then return "page" end
+	if unsupported[ext] then return "unsupported" end
 end
 
 -- "page2" sorts before "page10": digit runs compare as numbers.
@@ -39,22 +45,29 @@ local function natural(a, b)
 end
 
 local function sortedpages(archive)
-	local pages = {}
+	local pages, skipped = {}, 0
 	for _, name in ipairs(archive.names) do
-		if ispage(name) then pages[#pages + 1] = name end
+		local kind = pagekind(name)
+		if kind == "page" then pages[#pages + 1] = name end
+		if kind == "unsupported" then skipped = skipped + 1 end
 	end
 	table.sort(pages, natural)
-	return pages
+	return pages, skipped
 end
 
-function cbz.load(data, filename)
-	local archive, err = zip.open(data)
-	if not archive then return nil, err end
-	local names = sortedpages(archive)
-	if #names == 0 then return nil, "no images in this comic" end
+function cbz.load(archive, filename)
+	local names, skipped = sortedpages(archive)
+	if #names == 0 then
+		if skipped > 0 then return nil, "its pages are WebP/GIF, which luareader can't show yet" end
+		return nil, "no images in this comic"
+	end
 
-	local doc = { blocks = {}, chapters = {}, pages = {}, comic = true, imageraw = archive.raw }
-	doc.title = filename:gsub("%.[^.]+$", ""):gsub("[_]+", " ")
+	local doc = { blocks = {}, chapters = {}, pages = {}, comic = true,
+		imageraw = archive.raw, close = archive.close }
+	if skipped > 0 then
+		doc.warning = ("%d WebP/GIF page%s skipped (not supported yet)"):format(skipped, skipped == 1 and "" or "s")
+	end
+	doc.title = text.toutf8(filename):gsub("%.[^.]+$", ""):gsub("[_]+", " ")
 
 	-- ComicInfo.xml (ComicRack metadata), when present.
 	local info = archive.read("ComicInfo.xml")
@@ -81,7 +94,8 @@ function cbz.load(data, filename)
 		doc.pages[i] = { src = name, block = i }
 		local dir = name:match("^(.*)/[^/]*$") or ""
 		if dir ~= lastdir then
-			doc.chapters[#doc.chapters + 1] = { title = dir ~= "" and (dir:match("([^/]+)$") or dir) or "Pages", block = i }
+			local title = dir ~= "" and (dir:match("([^/]+)$") or dir) or "Pages"
+			doc.chapters[#doc.chapters + 1] = { title = text.toutf8(title), block = i }
 			lastdir = dir
 		end
 	end
@@ -90,9 +104,7 @@ function cbz.load(data, filename)
 end
 
 -- The first page's still-compressed bytes, for library thumbnails.
-function cbz.coverraw(data)
-	local archive = zip.open(data)
-	if not archive then return nil end
+function cbz.coverraw(archive)
 	local first = sortedpages(archive)[1]
 	if first then return archive.raw(first) end
 end

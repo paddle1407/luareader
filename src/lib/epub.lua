@@ -3,7 +3,8 @@
 -- block = { kind = "p"|"h"|"quote"|"center"|"rule", runs = { { text, style } | { br = true } } }
 --       | { kind = "image", src = path in the archive, w, h, runs = {} }
 -- style is one of "r", "i", "b", "bi". The book's CSS is ignored on purpose.
--- doc.imageraw(src) returns an image's still-compressed bytes for lazy loading.
+-- doc.imageraw(src) returns an image's still-compressed bytes for lazy loading;
+-- doc.close() releases the archive. Loaders take an archive from lib/zip.
 
 local zip = require("lib.zip")
 local xml = require("lib.xml")
@@ -226,11 +227,8 @@ local function readtoc(archive, manifest, opfdir, spinetoc)
 	return entries
 end
 
--- Opens the zip and parses the package (OPF) file.
-local function openpackage(data)
-	local archive, err = zip.open(data)
-	if not archive then return nil, err end
-
+-- Parses the package (OPF) file of an opened archive.
+local function openpackage(archive)
 	local container = archive.read("META-INF/container.xml")
 	if not container then return nil, "missing META-INF/container.xml" end
 	local rootfile = xml.find(xml.parse(container), "rootfile")
@@ -267,16 +265,16 @@ local function coverpath(opf, manifest)
 end
 
 -- Just the cover's still-compressed bytes, for library thumbnails.
-function epub.coverraw(data)
-	local archive, opf, _, manifest = openpackage(data)
-	if not archive then return nil end
+function epub.coverraw(archive)
+	local ok, opf, _, manifest = openpackage(archive)
+	if not ok then return nil end
 	local path = coverpath(opf, manifest)
 	if path then return archive.raw(path) end
 end
 
-function epub.load(data)
-	local archive, opf, opfpath, manifest = openpackage(data)
-	if not archive then return nil, opf end
+function epub.load(archive)
+	local ok, opf, opfpath, manifest = openpackage(archive)
+	if not ok then return nil, opf end
 	local opfdir = dirname(opfpath)
 
 	local doc = { blocks = {}, chapters = {} }
@@ -286,6 +284,7 @@ function epub.load(data)
 	doc.author = creator and clean(xml.text(creator)) or nil
 	doc.cover = coverpath(opf, manifest)
 	doc.imageraw = archive.raw
+	doc.close = archive.close
 
 	local spine = xml.find(opf, "spine")
 	if not spine then return nil, "no spine in " .. opfpath end
@@ -352,7 +351,9 @@ function epub.load(data)
 
 	if #doc.blocks == 0 then return nil, "no readable text found" end
 
-	-- Mostly pictures (fixed-layout comics, manga): read it in the comic view.
+	-- Nearly all pictures (fixed-layout comics, manga): read it in the comic view.
+	-- The bar is low on purpose, since the comic view shows no text at all: a
+	-- picture book with captions must stay a book.
 	local nimages, chars = 0, 0
 	for _, b in ipairs(doc.blocks) do
 		if b.kind == "image" then
@@ -361,7 +362,7 @@ function epub.load(data)
 			for _, r in ipairs(b.runs) do chars = chars + #(r.text or "") end
 		end
 	end
-	if nimages >= 3 and chars < nimages * 120 then
+	if nimages >= 3 and chars <= math.max(200, nimages * 15) then
 		doc.comic = true
 		doc.pages = {}
 		for i, b in ipairs(doc.blocks) do

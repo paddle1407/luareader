@@ -35,7 +35,7 @@ end
 local queues, results
 local nextworker = 1
 local threads = {}
-local cache = {} -- key -> { img, pending, failed, used, bytes }
+local cache = {} -- key -> { img, pending, failed, used, bytes, pinned }
 local pending = 0
 local frame = 0
 local total = 0
@@ -53,7 +53,9 @@ end
 
 -- Returns the texture for key if it's ready. Otherwise starts loading it:
 -- loader() must return the raw (possibly deflated) bytes and zip method.
-function images.get(key, loader)
+-- Pinned entries survive images.clear() and eviction until images.drop(key);
+-- covers use this so a thumbnail can't be lost halfway through.
+function images.get(key, loader, pinned)
 	local e = cache[key]
 	if e then
 		e.used = frame
@@ -64,7 +66,7 @@ function images.get(key, loader)
 		cache[key] = { failed = true, used = frame }
 		return nil
 	end
-	cache[key] = { pending = true, used = frame }
+	cache[key] = { pending = true, used = frame, pinned = pinned }
 	pending = pending + 1
 	local q = queues[nextworker]
 	nextworker = nextworker % WORKERS + 1
@@ -100,7 +102,9 @@ images.drop = free
 function images.clear()
 	for key, e in pairs(cache) do
 		-- Keep pending entries so their results are recognised and freed.
-		if e.pending then e.orphan = true else free(key) end
+		if e.pinned then -- left for its owner to drop
+		elseif e.pending then e.orphan = true
+		else free(key) end
 	end
 end
 
@@ -129,7 +133,7 @@ function images.update()
 	if total > BUDGET then
 		local old = {}
 		for key, e in pairs(cache) do
-			if e.img and e.used < frame - 1 then old[#old + 1] = key end
+			if e.img and not e.pinned and e.used < frame - 1 then old[#old + 1] = key end
 		end
 		table.sort(old, function(a, b) return cache[a].used < cache[b].used end)
 		for _, key in ipairs(old) do

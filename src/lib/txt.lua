@@ -52,7 +52,7 @@ function txt.load(data, filename)
 	end
 
 	local doc = { blocks = {}, chapters = {} }
-	doc.title = title or filename:gsub("%.[^.]+$", ""):gsub("[_%-]+", " ")
+	doc.title = title or text.toutf8(filename):gsub("%.[^.]+$", ""):gsub("[_%-]+", " ")
 	doc.author = author
 
 	for _, p in ipairs(paragraphs) do
