@@ -351,6 +351,23 @@ function epub.load(data)
 	doc.chapters = chapters
 
 	if #doc.blocks == 0 then return nil, "no readable text found" end
+
+	-- Mostly pictures (fixed-layout comics, manga): read it in the comic view.
+	local nimages, chars = 0, 0
+	for _, b in ipairs(doc.blocks) do
+		if b.kind == "image" then
+			nimages = nimages + 1
+		else
+			for _, r in ipairs(b.runs) do chars = chars + #(r.text or "") end
+		end
+	end
+	if nimages >= 3 and chars < nimages * 120 then
+		doc.comic = true
+		doc.pages = {}
+		for i, b in ipairs(doc.blocks) do
+			if b.kind == "image" then doc.pages[#doc.pages + 1] = { src = b.src, block = i } end
+		end
+	end
 	return doc
 end
 

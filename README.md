@@ -1,10 +1,10 @@
 # luareader
 
-A small novel reader for `.txt` and `.epub`, written in Lua on LÖVE 11.5.
+A small novel and comic reader for `.txt`, `.epub` and `.cbz`, written in Lua on LÖVE 11.5.
 
     ./setup.sh               # once: fetches LÖVE 11.5 into .love/
     ./run.sh                 # library of recent books
-    ./run.sh book.epub       # open a book directly
+    ./run.sh book.epub       # open a book (or comic) directly
 
 Or drop a file onto the window. The cog (top right, or `s`) opens settings:
 reading options, auto-scroll and the reading guide, and key bindings. `?` jumps
@@ -31,10 +31,12 @@ To remove everything, delete that symlink (if you made one) and this directory.
 ## Layout
 
     src/main.lua        app: library, reader, settings, auto-scroll, event-driven loop
+    src/comic.lua       comic view: fitted pages, spreads, right-to-left, zoom, prefetch
     src/lib/ui.lua      small widgets: buttons, steppers, toggles, icons
     src/lib/keys.lua    rebindable actions and default keys
     src/lib/layout.lua  line breaking, justification, mixed italic and bold
     src/lib/epub.lua    EPUB 2/3: container → OPF → spine, TOC from nav/NCX
+    src/lib/cbz.lua     CBZ comics: natural page order, folders as chapters, ComicInfo.xml
     src/lib/txt.lua     paragraphs, chapter detection, _italics_, Gutenberg cleanup
     src/lib/images.lua  background image decoding (worker threads) and texture cache
     src/lib/imgsize.lua reads PNG/JPEG/BMP sizes from headers without decoding

@@ -3,6 +3,8 @@
 local layout = require("lib.layout")
 local epub = require("lib.epub")
 local txt = require("lib.txt")
+local cbz = require("lib.cbz")
+local comic = require("comic")
 local store = require("lib.store")
 local keys = require("lib.keys")
 local ui = require("lib.ui")
@@ -37,6 +39,7 @@ local defaults = {
 	settings = {
 		size = 20, width = 680, lineheight = 1.55, theme = "dark", font = "notoserif", justify = true,
 		wpm = 250, fastwpm = 350, automode = "lines", guide = true, guidepos = 35, guidedim = true,
+		comicdir = "ltr", comicfit = "page", comicspread = true,
 		keys = {},
 	},
 	books = {},
@@ -63,6 +66,8 @@ local settingsui = { tab = "reading", scroll = 0, capture = nil, rect = nil }
 local thumbs = {}
 local coverqueue, coverqueued = {}, {}
 local coverwait = {}
+local comicbusy = false -- a page slide or scroll is running in the comic view
+local drag -- mouse drag in the comic view: { x, y, moved }
 
 local function theme() return themes[state.settings.theme] or themes.dark end
 
@@ -162,7 +167,7 @@ local function progress()
 end
 
 local function chapterindex()
-	local b = position()
+	local b = book.doc.comic and book.doc.pages[comic.page(book)].block or position()
 	local idx = 1
 	for i, c in ipairs(book.doc.chapters) do
 		if c.block <= b then idx = i else break end
@@ -201,6 +206,7 @@ end
 
 local function relayout()
 	if not book then return end
+	if book.doc.comic then return comic.regroup(book) end
 	auto.line, auto.anim = nil, nil
 	local b, frac
 	if book.laid then b, frac = position() end
@@ -276,7 +282,12 @@ end
 
 local function gotochapter(i)
 	local c = book.doc.chapters[i]
-	if c then
+	if not c then return end
+	if book.doc.comic then
+		for p, page in ipairs(book.doc.pages) do
+			if page.block >= c.block then return comic.gotopage(book, p) end
+		end
+	else
 		gotoblock(c.block, 0)
 	end
 end
@@ -285,7 +296,13 @@ local function prevchapter()
 	local i = chapterindex()
 	local c = book.doc.chapters[i]
 	-- Like a media player: first go back to the start of this chapter.
-	if c and book.target > book.laid.lines[book.laid.blockline[c.block]].y + 1 then
+	local into
+	if c and book.doc.comic then
+		into = book.doc.pages[comic.page(book)].block > c.block
+	elseif c then
+		into = book.target > book.laid.lines[book.laid.blockline[c.block]].y + 1
+	end
+	if into then
 		gotochapter(i)
 	else
 		gotochapter(i - 1)
@@ -297,6 +314,11 @@ end
 local function savepos()
 	if not book then return end
 	local entry = state.books[book.path]
+	if book.doc.comic then
+		entry.page = comic.page(book)
+		entry.progress = comic.progress(book)
+		return
+	end
 	entry.block, entry.frac = position()
 	entry.progress = progress()
 end
@@ -367,9 +389,10 @@ local function updatecovers()
 	local entry = p and state.books[p]
 	if entry and entry.cover == nil then
 		local raw, method
-		if p:lower():match("%.epub$") then
+		local kind = p:lower():match("%.(%w+)$")
+		if kind == "epub" or kind == "cbz" then
 			local data = readfile(p)
-			local ok, r, m = pcall(epub.coverraw, data or "")
+			local ok, r, m = pcall(kind == "epub" and epub.coverraw or cbz.coverraw, data or "")
 			if ok then raw, method = r, m end
 		end
 		if raw then makecover(p, function() return raw, method end) else entry.cover = false end
@@ -378,15 +401,16 @@ end
 
 local function openbook(path)
 	local ext = (path:match("%.(%w+)$") or ""):lower()
-	if ext ~= "epub" and ext ~= "txt" then
-		showtoast("Can only open .txt and .epub files")
+	local loaders = { epub = epub.load, cbz = cbz.load, txt = txt.load }
+	if not loaders[ext] then
+		showtoast("Can only open .txt, .epub and .cbz files")
 		return
 	end
 	local data, err = readfile(path)
 	local doc
 	if data then
 		local filename = path:match("([^/]+)$")
-		local ok, res, lerr = pcall(ext == "epub" and epub.load or txt.load, data, filename)
+		local ok, res, lerr = pcall(loaders[ext], data, filename)
 		if not ok then err = res elseif not res then err = lerr else doc = res end
 	end
 	if not doc then
@@ -398,14 +422,18 @@ local function openbook(path)
 	images.clear()
 	book = { path = path, doc = doc, scroll = 0, target = 0 }
 	auto.on, auto.paused, fast.on = false, false, false
-	relayout()
 
 	local entry = state.books[path] or {}
 	state.books[path] = entry
 	entry.title = doc.title or path:match("([^/]+)$")
 	entry.author = doc.author
 	entry.opened = os.time()
-	if entry.block then gotoblock(entry.block, entry.frac, true) end
+	if doc.comic then
+		comic.open(book, entry.page)
+	else
+		relayout()
+		if entry.block then gotoblock(entry.block, entry.frac, true) end
+	end
 	if entry.cover == nil and doc.imageraw then
 		local src = doc.cover
 		if not src and doc.blocks[1] and doc.blocks[1].kind == "image" then src = doc.blocks[1].src end
@@ -609,7 +637,7 @@ local function autostop()
 end
 
 local function toggleautoscroll()
-	if not book then return end
+	if not book or book.doc.comic then return end
 	if auto.on then autostop() else autostart() end
 end
 
@@ -674,7 +702,7 @@ local function faststep(n)
 end
 
 local function togglefast()
-	if not book then return end
+	if not book or book.doc.comic then return end
 	if fast.on then fastexit() else faststart() end
 end
 
@@ -746,7 +774,7 @@ local function drawbuttons()
 	color(hov and th.fg or th.dim, hov and 1 or 0.8)
 	ui.cog(cx, 34, 9, th.bg)
 
-	if screen ~= "reader" or not book then return end
+	if screen ~= "reader" or not book or book.doc.comic then return end
 
 	-- Fast reader button (lightning bolt); in the fast reader it's the way out.
 	local fy = fast.on and 80 or 126
@@ -982,7 +1010,7 @@ local function drawlibrary()
 	lg.printf("luareader", 0, floor(H * 0.1), W, "center")
 	color(th.dim)
 	lg.setFont(fonts.ui)
-	lg.printf("drop a .txt or .epub onto the window  ·  press ? for keys", 0, floor(H * 0.1) + 70, W, "center")
+	lg.printf("drop a .txt, .epub or .cbz onto the window  ·  press ? for keys", 0, floor(H * 0.1) + 70, W, "center")
 
 	local books = recentbooks()
 	libsel = clamp(libsel, 1, max(1, #books))
@@ -1134,7 +1162,21 @@ local function drawreadingtab(x, y, w)
 	y = y + ROW
 	ui.toggle(xr, settingrow(x, y, w, "Justify text", "Even right edge, like a printed book"), s.justify,
 		function() setjustify(not s.justify) end)
-	return ROW * 6
+	y = y + ROW + 20
+
+	ui.text("COMICS", x, y, fonts.ui, theme().dim)
+	y = y + 22
+	ui.segmented(xr, settingrow(x, y, w, "Page order", "Right to left for manga"), {
+		{ id = "ltr", label = "Left to right" }, { id = "rtl", label = "Right to left" },
+	}, s.comicdir, function(id) s.comicdir = id end)
+	y = y + ROW
+	ui.segmented(xr, settingrow(x, y, w, "Fit", "Width scrolls through tall pages"), {
+		{ id = "page", label = "Whole page" }, { id = "width", label = "Width" },
+	}, s.comicfit, function(id) s.comicfit = id; relayout() end)
+	y = y + ROW
+	ui.toggle(xr, settingrow(x, y, w, "Two-page spreads", "Side by side when the window is wide"), s.comicspread,
+		function() s.comicspread = not s.comicspread; relayout() end)
+	return ROW * 9 + 42
 end
 
 local function drawautotab(x, y, w)
@@ -1307,6 +1349,10 @@ function love.load(args)
 	W, H = lg.getDimensions()
 	images.init()
 	loadfonts()
+	comic.init({
+		theme = theme, color = color, fonts = fonts, settings = function() return state.settings end,
+		image = function(src) return bookimage(src) end,
+	})
 	love.keyboard.setKeyRepeat(true)
 	if args[1] then openbook(args[1]) end
 end
@@ -1378,7 +1424,10 @@ end
 function love.update(dt)
 	images.update()
 	updatecovers()
-	if book and fast.on then
+	comicbusy = false
+	if book and book.doc.comic then
+		comicbusy = comic.update(book, dt)
+	elseif book and fast.on then
 		if not fast.paused and not overlay then updatefast(dt) end
 	elseif book then
 		if auto.on then
@@ -1405,7 +1454,11 @@ function love.draw()
 	ui.th = th
 	ui.reset()
 	settingsui.rect = nil
-	if screen == "reader" and book and fast.on then
+	if screen == "reader" and book and book.doc.comic then
+		comic.draw(book)
+		drawbuttons()
+		if overlay == "toc" then drawtoc() end
+	elseif screen == "reader" and book and fast.on then
 		drawfast()
 	elseif screen == "reader" and book then
 		drawreader()
@@ -1495,6 +1548,29 @@ function love.keypressed(key)
 		return
 	end
 
+	if book and book.doc.comic and screen == "reader" then
+		local action = keymap[key]
+		if key == "right" then comic.right(book)
+		elseif key == "left" then comic.left(book)
+		elseif key == "down" or key == "j" then
+			if comic.canscroll(book) then comic.scroll(book, 120) else comic.forward(book) end
+		elseif key == "up" or key == "k" then
+			if comic.canscroll(book) then comic.scroll(book, -120) else comic.backward(book) end
+		elseif action == "nextpage" then
+			if shift then comic.backward(book) else comic.forward(book) end
+		elseif action == "prevpage" then comic.backward(book)
+		elseif action == "start" then comic.gotopage(book, 1)
+		elseif action == "finish" then comic.gotopage(book, #book.doc.pages)
+		elseif action == "bigger" then comic.zoom(book, 1.25)
+		elseif action == "smaller" then comic.zoom(book, 0.8)
+		elseif key == "0" or key == "kp0" then comic.resetzoom(book)
+		elseif action and ({ nextchapter = 1, prevchapter = 1, contents = 1, theme = 1, settings = 1,
+			fullscreen = 1, library = 1 })[action] then
+			actions[action]()
+		end
+		return
+	end
+
 	if fast.on and screen == "reader" then
 		if key == "space" then fast.paused = not fast.paused
 		elseif key == "left" then faststep(-1)
@@ -1542,6 +1618,17 @@ function love.wheelmoved(_, y)
 		settingsui.scroll = clamp(settingsui.scroll - y * 40, 0, settingsui.maxscroll or 0)
 	elseif overlay == "toc" then
 		tocsel = clamp(tocsel - y, 1, #book.doc.chapters)
+	elseif screen == "reader" and book and book.doc.comic then
+		if love.keyboard.isDown("lctrl", "rctrl") then
+			local mx, my = love.mouse.getPosition()
+			comic.zoom(book, 1.15 ^ y, mx, my)
+		elseif comic.canscroll(book) then
+			comic.scroll(book, -y * 90)
+		elseif y < 0 then
+			comic.forward(book)
+		else
+			comic.backward(book)
+		end
 	elseif screen == "reader" and book and fast.on then
 		faststep(y > 0 and -1 or 1)
 	elseif screen == "reader" and book and auto.on then
@@ -1555,6 +1642,12 @@ end
 
 function love.mousepressed(x, y, button)
 	if button == 1 and ui.click(x, y) then return end
+	if screen == "reader" and book and book.doc.comic and not overlay then
+		if button == 1 then drag = { x = x, y = y, moved = false } end
+		if button == 4 then comic.backward(book) end
+		if button == 5 then comic.forward(book) end
+		return
+	end
 	if screen == "reader" and book and fast.on and not overlay then
 		fast.paused = not fast.paused
 		return
@@ -1583,6 +1676,24 @@ function love.mousepressed(x, y, button)
 	end
 end
 
+function love.mousemoved(x, y, dx, dy)
+	if drag and book and book.doc.comic then
+		if not drag.moved and abs(x - drag.x) + abs(y - drag.y) > 5 then drag.moved = true end
+		if drag.moved then comic.drag(book, dx, dy) end
+	end
+end
+
+function love.mousereleased(x, y, button)
+	if button ~= 1 or not drag then return end
+	local d = drag
+	drag = nil
+	if d.moved or not (book and book.doc.comic) or overlay then return end
+	if x < W * 0.3 then comic.left(book)
+	elseif x > W * 0.7 then comic.right(book)
+	else comic.forward(book)
+	end
+end
+
 -- Event-driven main loop: sleeps until input arrives, and only keeps drawing
 -- frames while something is animating (scrolling, auto-scroll, toast fade).
 function love.run()
@@ -1602,7 +1713,7 @@ function love.run()
 
 	return function()
 		local animating = toast ~= nil or autoscrolling() or (book and book.scroll ~= book.target)
-			or images.busy() or #coverqueue > 0 or next(coverwait) ~= nil
+			or images.busy() or #coverqueue > 0 or next(coverwait) ~= nil or comicbusy
 		if drawn and not animating then
 			local exit = handle(love.event.wait())
 			if exit then return exit end
