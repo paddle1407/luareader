@@ -1,5 +1,6 @@
 -- Lays out document blocks into positioned lines for a given column width.
 --   line = { y, h, block, items = { { font, text, x } ... } } or { y, h, block, rule = true }
+--       or { y, h, block, image = src, x, w } for pictures
 
 local layout = {}
 
@@ -59,10 +60,11 @@ local function words(block, fonts)
 end
 
 -- Vertical space around block kinds, in body lines.
-local before = { h = 1.4, quote = 0.5, center = 0.6, rule = 0.8 }
-local after = { h = 0.9, quote = 0.5, center = 0.6, rule = 0.8 }
+local before = { h = 1.4, quote = 0.5, center = 0.6, rule = 0.8, image = 0.8 }
+local after = { h = 0.9, quote = 0.5, center = 0.6, rule = 0.8, image = 0.8 }
 
--- opts: fonts = { body = {r,i,b,bi}, head = {r,i,b,bi} }, width, size, lineheight, justify
+-- opts: fonts = { body = {r,i,b,bi}, head = {r,i,b,bi} }, width, size, lineheight, justify,
+--       maxh (tallest an image may be, so it always fits on one page)
 function layout.build(blocks, opts)
 	local lines, blockline = {}, {}
 	local W = opts.width
@@ -86,6 +88,12 @@ function layout.build(blocks, opts)
 		if kind == "rule" then
 			lines[#lines + 1] = { y = y, h = bodylh, block = bi, rule = true }
 			y = y + bodylh
+		elseif kind == "image" then
+			-- Natural size at most; shrink to the column width and the page height.
+			local scale = math.min(1, W / block.w, (opts.maxh or math.huge) / block.h)
+			local w, h = floor(block.w * scale), floor(block.h * scale)
+			lines[#lines + 1] = { y = y, h = h, block = bi, image = block.src, x = floor((W - w) / 2), w = w }
+			y = y + h
 		else
 			local heading = kind == "h"
 			local fonts = heading and opts.fonts.head or opts.fonts.body

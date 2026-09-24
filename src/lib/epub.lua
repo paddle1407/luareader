@@ -1,10 +1,13 @@
 -- EPUB (2 and 3) loader. Produces the common document shape:
 --   { title, author, blocks = { block... }, chapters = { { title, block } ... } }
 -- block = { kind = "p"|"h"|"quote"|"center"|"rule", runs = { { text, style } | { br = true } } }
+--       | { kind = "image", src = path in the archive, w, h, runs = {} }
 -- style is one of "r", "i", "b", "bi". The book's CSS is ignored on purpose.
+-- doc.imageraw(src) returns an image's still-compressed bytes for lazy loading.
 
 local zip = require("lib.zip")
 local xml = require("lib.xml")
+local imgsize = require("lib.imgsize")
 
 local epub = {}
 
@@ -41,7 +44,7 @@ local blocktags = {
 }
 local italictags = { em = true, i = true, cite = true, dfn = true, var = true }
 local boldtags = { strong = true, b = true }
-local skiptags = { head = true, script = true, style = true, svg = true, math = true, title = true }
+local skiptags = { head = true, script = true, style = true, math = true, title = true }
 
 local function stylename(italic, bold)
 	if italic and bold then return "bi" end
@@ -64,7 +67,7 @@ end
 
 -- Converts one XHTML body into blocks appended to doc.blocks.
 -- anchors maps element ids to chapter titles found in the TOC for this file.
-local function convert(body, doc, anchors)
+local function convert(body, doc, anchors, archive, dir)
 	local blocks = doc.blocks
 	local cur
 
@@ -81,6 +84,19 @@ local function convert(body, doc, anchors)
 			blocks[#blocks + 1] = cur
 		end
 		cur = nil
+	end
+
+	-- Image blocks carry their pixel size (read from the header) so pages can be
+	-- laid out without decoding anything.
+	local function addimage(src)
+		if not src or src:find("^data:") then return end
+		local path = resolve(dir, src)
+		if not archive.has(path) then return end
+		local w, h = imgsize(archive.head(path, 65536))
+		if not w then w, h = imgsize(archive.read(path)) end
+		if not w or w < 2 or h < 2 then return end
+		flush()
+		blocks[#blocks + 1] = { kind = "image", src = path, w = w, h = h, runs = {} }
 	end
 
 	local function ensure(ctx)
@@ -112,7 +128,14 @@ local function convert(body, doc, anchors)
 			anchors[id] = nil
 		end
 
-		if tag == "br" then
+		if tag == "img" or tag == "image" then
+			addimage(node.attrs.src or node.attrs.href)
+			return
+		elseif tag == "svg" then
+			-- Only the raster images inside an SVG wrapper (common for covers).
+			for _, img in ipairs(xml.findall(node, "image")) do addimage(img.attrs.href) end
+			return
+		elseif tag == "br" then
 			ensure(ctx)
 			cur.runs[#cur.runs + 1] = { br = true }
 			return
@@ -203,7 +226,8 @@ local function readtoc(archive, manifest, opfdir, spinetoc)
 	return entries
 end
 
-function epub.load(data)
+-- Opens the zip and parses the package (OPF) file.
+local function openpackage(data)
 	local archive, err = zip.open(data)
 	if not archive then return nil, err end
 
@@ -218,12 +242,6 @@ function epub.load(data)
 	local opf = xml.parse(opfsrc)
 	local opfdir = dirname(opfpath)
 
-	local doc = { blocks = {}, chapters = {} }
-	local title = xml.find(opf, "title")
-	local creator = xml.find(opf, "creator")
-	doc.title = title and clean(xml.text(title)) or nil
-	doc.author = creator and clean(xml.text(creator)) or nil
-
 	local manifest = {}
 	for _, item in ipairs(xml.findall(opf, "item")) do
 		if item.attrs.id and item.attrs.href then
@@ -234,6 +252,40 @@ function epub.load(data)
 			}
 		end
 	end
+	return archive, opf, opfpath, manifest
+end
+
+-- The cover image's path: EPUB 3 "cover-image" item, or EPUB 2 <meta name="cover">.
+local function coverpath(opf, manifest)
+	for _, item in pairs(manifest) do
+		if (item.properties or ""):find("cover%-image") then return item.path end
+	end
+	for _, meta in ipairs(xml.findall(opf, "meta")) do
+		local item = meta.attrs.name == "cover" and manifest[meta.attrs.content or ""]
+		if item and (item.mediatype or ""):find("^image/") then return item.path end
+	end
+end
+
+-- Just the cover's still-compressed bytes, for library thumbnails.
+function epub.coverraw(data)
+	local archive, opf, _, manifest = openpackage(data)
+	if not archive then return nil end
+	local path = coverpath(opf, manifest)
+	if path then return archive.raw(path) end
+end
+
+function epub.load(data)
+	local archive, opf, opfpath, manifest = openpackage(data)
+	if not archive then return nil, opf end
+	local opfdir = dirname(opfpath)
+
+	local doc = { blocks = {}, chapters = {} }
+	local title = xml.find(opf, "title")
+	local creator = xml.find(opf, "creator")
+	doc.title = title and clean(xml.text(title)) or nil
+	doc.author = creator and clean(xml.text(creator)) or nil
+	doc.cover = coverpath(opf, manifest)
+	doc.imageraw = archive.raw
 
 	local spine = xml.find(opf, "spine")
 	if not spine then return nil, "no spine in " .. opfpath end
@@ -275,7 +327,7 @@ function epub.load(data)
 				doc.chapters[#doc.chapters + 1] = { title = info.starts[1], block = first }
 			end
 
-			convert(body, doc, info.anchors)
+			convert(body, doc, info.anchors, archive, dirname(item.path))
 
 			-- Anchors that never matched an element point at the file start.
 			for _, t in pairs(info.anchors) do

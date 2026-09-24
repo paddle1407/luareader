@@ -40,13 +40,40 @@ function zip.open(data)
 
 	local archive = { names = names }
 
-	function archive.read(name)
-		local e = entries[name]
-		if not e then return nil, "missing entry: " .. name end
+	local function datastart(e)
 		-- Local header has its own name/extra lengths, which may differ.
 		local nlen = u16(data, e.lhpos + 26)
 		local elen = u16(data, e.lhpos + 28)
-		local start = e.lhpos + 30 + nlen + elen
+		return e.lhpos + 30 + nlen + elen
+	end
+
+	function archive.has(name) return entries[name] ~= nil end
+
+	-- Still-compressed bytes and the compression method (0 stored, 8 deflate),
+	-- so the inflating can happen somewhere else (e.g. a worker thread).
+	function archive.raw(name)
+		local e = entries[name]
+		if not e then return nil end
+		local start = datastart(e)
+		return data:sub(start, start + e.csize - 1), e.method
+	end
+
+	-- The first n bytes of an entry; cheap for stored entries, which is how
+	-- most EPUB images are kept.
+	function archive.head(name, n)
+		local e = entries[name]
+		if not e then return nil end
+		if e.method == 0 then
+			local start = datastart(e)
+			return data:sub(start, start + math.min(n, e.csize) - 1)
+		end
+		return archive.read(name)
+	end
+
+	function archive.read(name)
+		local e = entries[name]
+		if not e then return nil, "missing entry: " .. name end
+		local start = datastart(e)
 		local raw = data:sub(start, start + e.csize - 1)
 		if e.method == 0 then
 			return raw

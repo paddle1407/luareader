@@ -6,6 +6,7 @@ local txt = require("lib.txt")
 local store = require("lib.store")
 local keys = require("lib.keys")
 local ui = require("lib.ui")
+local images = require("lib.images")
 
 local lg = love.graphics
 local floor, min, max, abs = math.floor, math.min, math.max, math.abs
@@ -19,9 +20,9 @@ end
 
 -- Gruvbox, with its pink (purple) as the accent.
 local themes = {
-	dark = { bg = hex("#282828"), fg = hex("#ebdbb2"), dim = hex("#928374"), accent = hex("#d3869b"), panel = hex("#3c3836") },
-	hard = { bg = hex("#1d2021"), fg = hex("#ebdbb2"), dim = hex("#928374"), accent = hex("#d3869b"), panel = hex("#282828") },
-	light = { bg = hex("#fbf1c7"), fg = hex("#3c3836"), dim = hex("#928374"), accent = hex("#b16286"), panel = hex("#f9f5d7") },
+	dark = { bg = hex("#282828"), fg = hex("#ebdbb2"), dim = hex("#928374"), accent = hex("#d3869b"), panel = hex("#3c3836"), image = 0.88 },
+	hard = { bg = hex("#1d2021"), fg = hex("#ebdbb2"), dim = hex("#928374"), accent = hex("#d3869b"), panel = hex("#282828"), image = 0.85 },
+	light = { bg = hex("#fbf1c7"), fg = hex("#3c3836"), dim = hex("#928374"), accent = hex("#b16286"), panel = hex("#f9f5d7"), image = 1 },
 }
 local themeorder = { "dark", "hard", "light" }
 
@@ -57,6 +58,11 @@ local W, H
 local libsel, libscroll = 1, 0
 local tocsel, tocscroll = 1, 0
 local settingsui = { tab = "reading", scroll = 0, capture = nil, rect = nil }
+-- Library cover thumbnails: loaded thumbnail textures, books waiting for a
+-- cover scan (one per frame), and cover images waiting on the decoder.
+local thumbs = {}
+local coverqueue, coverqueued = {}, {}
+local coverwait = {}
 
 local function theme() return themes[state.settings.theme] or themes.dark end
 
@@ -202,6 +208,7 @@ local function relayout()
 	book.laid = layout.build(book.doc.blocks, {
 		fonts = fonts, width = book.colw, size = state.settings.size,
 		lineheight = state.settings.lineheight, justify = state.settings.justify,
+		maxh = floor(viewh() * 0.92),
 	})
 
 	local laid = book.laid
@@ -307,6 +314,68 @@ local function readfile(path)
 	return data
 end
 
+local function bookimage(src)
+	return images.get(book.path .. "|" .. src, function() return book.doc.imageraw(src) end)
+end
+
+local function thumbname(p)
+	return "covers/" .. love.data.encode("string", "hex", love.data.hash("md5", p)) .. ".png"
+end
+
+-- Starts decoding a book's cover; updatecovers() turns it into a thumbnail.
+local function makecover(p, loader)
+	local key = "cover|" .. p
+	coverwait[key] = p
+	images.get(key, loader)
+end
+
+-- Renders decoded covers into small thumbnails in the save dir, and scans
+-- at most one library book per frame for a cover it doesn't have yet.
+local function updatecovers()
+	for key, p in pairs(coverwait) do
+		local st, img = images.status(key)
+		local entry = state.books[p]
+		if st == "ready" and entry then
+			local tw, th = 80, 116
+			local canvas = lg.newCanvas(tw, th)
+			lg.push("all")
+			lg.setCanvas(canvas)
+			lg.clear(0, 0, 0, 0)
+			lg.origin()
+			lg.setColor(1, 1, 1)
+			local iw, ih = img:getDimensions()
+			local sc = max(tw / iw, th / ih)
+			lg.draw(img, tw / 2, th / 2, 0, sc, sc, iw / 2, ih / 2)
+			lg.pop()
+			love.filesystem.createDirectory("covers")
+			local name = thumbname(p)
+			canvas:newImageData():encode("png", name)
+			canvas:release()
+			thumbs[name] = nil
+			entry.cover = name
+			save()
+		elseif st ~= "pending" and entry then
+			entry.cover = false
+		end
+		if st ~= "pending" then
+			images.drop(key)
+			coverwait[key] = nil
+		end
+	end
+
+	local p = table.remove(coverqueue, 1)
+	local entry = p and state.books[p]
+	if entry and entry.cover == nil then
+		local raw, method
+		if p:lower():match("%.epub$") then
+			local data = readfile(p)
+			local ok, r, m = pcall(epub.coverraw, data or "")
+			if ok then raw, method = r, m end
+		end
+		if raw then makecover(p, function() return raw, method end) else entry.cover = false end
+	end
+end
+
 local function openbook(path)
 	local ext = (path:match("%.(%w+)$") or ""):lower()
 	if ext ~= "epub" and ext ~= "txt" then
@@ -326,6 +395,7 @@ local function openbook(path)
 	end
 
 	persist()
+	images.clear()
 	book = { path = path, doc = doc, scroll = 0, target = 0 }
 	auto.on, auto.paused, fast.on = false, false, false
 	relayout()
@@ -336,6 +406,13 @@ local function openbook(path)
 	entry.author = doc.author
 	entry.opened = os.time()
 	if entry.block then gotoblock(entry.block, entry.frac, true) end
+	if entry.cover == nil and doc.imageraw then
+		local src = doc.cover
+		if not src and doc.blocks[1] and doc.blocks[1].kind == "image" then src = doc.blocks[1].src end
+		if src then makecover(path, function() return doc.imageraw(src) end) else entry.cover = false end
+	elseif entry.cover == nil then
+		entry.cover = false
+	end
 
 	screen, overlay = "reader", nil
 	love.window.setTitle(entry.title .. " — luareader")
@@ -344,6 +421,7 @@ end
 
 local function closebook()
 	persist()
+	images.clear()
 	book = nil
 	auto.on, auto.paused, fast.on = false, false, false
 	screen, overlay = "library", nil
@@ -429,6 +507,8 @@ end
 local function linewords(line)
 	if line.words then return line.words end
 	local ws = {}
+	line.words = ws
+	if not line.items then return ws end
 	for _, it in ipairs(line.items) do
 		local f, t, x = it[1], it[2], it[3]
 		local w = f:getWidth(t)
@@ -450,7 +530,7 @@ local function guidecenter() return viewh() * state.settings.guidepos / 100 end
 -- lines can still reach the guide.
 local function autobounds() return -guidecenter(), book.laid.height - guidecenter() end
 
-local function readable(line) return line and line.items and #line.items > 0 end
+local function readable(line) return line and (line.image or (line.items and #line.items > 0)) end
 
 local function paragraphend(i)
 	local lines = book.laid.lines
@@ -481,6 +561,7 @@ end
 -- Seconds to hold line i: its share of words at the chosen speed, plus a
 -- breath at the end of a paragraph.
 local function dwell(i)
+	if book.laid.lines[i].image then return 2.5 end
 	local t = max(0.6, #linewords(book.laid.lines[i]) * 60 / state.settings.wpm)
 	if paragraphend(i) then t = t + 0.4 end
 	return t
@@ -501,7 +582,8 @@ end
 
 local function holdline(i, dur)
 	auto.line, auto.word = i, 1
-	auto.timer = state.settings.automode == "words" and wordwait(i, 1) or dwell(i)
+	local words = state.settings.automode == "words" and #linewords(book.laid.lines[i]) > 0
+	auto.timer = words and wordwait(i, 1) or dwell(i)
 	animto(alignline(i), dur)
 end
 
@@ -741,7 +823,17 @@ local function drawreader()
 		local y = MARGIN_TOP + line.y - scroll
 		if y > bottom then break end
 		if y + line.h > MARGIN_TOP then
-			if line.rule then
+			if line.image then
+				local img = bookimage(line.image)
+				if img then
+					local k = th.image or 1
+					lg.setColor(k, k, k)
+					lg.draw(img, x0 + line.x, y, 0, line.w / img:getWidth(), line.h / img:getHeight())
+				else
+					color(th.fg, 0.05)
+					lg.rectangle("fill", x0 + line.x, y, line.w, line.h, 6, 6)
+				end
+			elseif line.rule then
 				color(th.dim, 0.6)
 				lg.setLineWidth(1)
 				local cx = x0 + book.colw / 2
@@ -766,6 +858,14 @@ local function drawreader()
 	end
 
 	if auto.on and state.settings.guide then drawguide(x0) end
+
+	-- Start decoding images a screen above and below, so they're ready in time.
+	local vh = viewh()
+	for li = layout.lineat(lines, scroll - vh) or 1, #lines do
+		local line = lines[li]
+		if line.y > scroll + vh * 2 then break end
+		if line.image then bookimage(line.image) end
+	end
 	for s = 0, FADE - 1 do
 		color(th.bg, (s + 1) / FADE)
 		lg.rectangle("fill", 0, bottom - FADE + s, W, 1)
@@ -887,7 +987,7 @@ local function drawlibrary()
 	local books = recentbooks()
 	libsel = clamp(libsel, 1, max(1, #books))
 	local top = floor(H * 0.1) + 120
-	local rowh = 64
+	local rowh = 76
 	local visible = max(1, floor((H - top - 40) / rowh))
 	libscroll = clamp(libscroll, max(0, libsel - visible), min(libsel - 1, max(0, #books - visible)))
 
@@ -900,23 +1000,48 @@ local function drawlibrary()
 	for n = libscroll + 1, min(#books, libscroll + visible) do
 		local b = books[n]
 		local y = top + (n - libscroll - 1) * rowh
-		local hovered = ui.hit(x0 - 12, y, cw + 24, rowh - 6, function() openbook(b.path) end)
+		local hovered = ui.hit(x0 - 12, y, cw + 24, rowh - 8, function() openbook(b.path) end)
 		if n == libsel or hovered then
 			color(th.fg, n == libsel and 0.06 or 0.035)
-			lg.rectangle("fill", x0 - 12, y, cw + 24, rowh - 6, 8, 8)
+			lg.rectangle("fill", x0 - 12, y, cw + 24, rowh - 8, 8, 8)
 		end
+		-- Cover thumbnail, or a plain spine with the title's first letter.
+		local cover = b.entry.cover
+		if cover == nil and not coverqueued[b.path] then
+			coverqueued[b.path] = true
+			coverqueue[#coverqueue + 1] = b.path
+		end
+		local img = cover and thumbs[cover]
+		if cover and img == nil then
+			img = love.filesystem.getInfo(cover) and lg.newImage(cover, { mipmaps = true }) or false
+			if img then img:setMipmapFilter("linear") end
+			thumbs[cover] = img
+		end
+		local tx, ty, tw, tht = x0, y + 5, 40, 58
+		if img then
+			local k = th.image or 1
+			lg.setColor(k, k, k)
+			lg.draw(img, tx, ty, 0, tw / img:getWidth(), tht / img:getHeight())
+		else
+			color(th.fg, 0.07)
+			lg.rectangle("fill", tx, ty, tw, tht, 3, 3)
+			local initial = (b.entry.title or "?"):match("[%z\1-\127\194-\244][\128-\191]*") or "?"
+			ui.label(initial, tx, ty, tw, tht, fonts.item, th.accent)
+		end
+
+		local lx, lw = x0 + tw + 16, cw - tw - 16
 		color(th.fg)
 		lg.setFont(fonts.item)
-		lg.print(ellipsize(fonts.item, b.entry.title or b.path, cw - 60), x0, y + 8)
+		lg.print(ellipsize(fonts.item, b.entry.title or b.path, lw - 60), lx, y + 12)
 		color(th.dim)
 		lg.setFont(fonts.ui)
 		local sub = b.entry.author or b.path:match("([^/]+)$")
-		lg.print(ellipsize(fonts.ui, sub, cw - 60), x0, y + 34)
-		lg.printf(floor((b.entry.progress or 0) * 100 + 0.5) .. "%", x0, y + 34, cw, "right")
+		lg.print(ellipsize(fonts.ui, sub, lw - 60), lx, y + 40)
+		lg.printf(floor((b.entry.progress or 0) * 100 + 0.5) .. "%", x0, y + 40, cw, "right")
 		color(th.dim, 0.2)
-		lg.rectangle("fill", cw + x0 - 40, y + 22, 40, 2)
+		lg.rectangle("fill", cw + x0 - 40, y + 26, 40, 2)
 		color(th.accent, 0.8)
-		lg.rectangle("fill", cw + x0 - 40, y + 22, floor(40 * (b.entry.progress or 0)), 2)
+		lg.rectangle("fill", cw + x0 - 40, y + 26, floor(40 * (b.entry.progress or 0)), 2)
 	end
 
 	drawbuttons()
@@ -1180,6 +1305,7 @@ function love.load(args)
 	keys.normalize(state.settings.keys)
 	keymap = keys.map(state.settings.keys)
 	W, H = lg.getDimensions()
+	images.init()
 	loadfonts()
 	love.keyboard.setKeyRepeat(true)
 	if args[1] then openbook(args[1]) end
@@ -1250,6 +1376,8 @@ local function updatefast(dt)
 end
 
 function love.update(dt)
+	images.update()
+	updatecovers()
 	if book and fast.on then
 		if not fast.paused and not overlay then updatefast(dt) end
 	elseif book then
@@ -1300,6 +1428,7 @@ end
 
 function love.quit()
 	persist()
+	images.shutdown()
 end
 
 function love.filedropped(file)
@@ -1473,6 +1602,7 @@ function love.run()
 
 	return function()
 		local animating = toast ~= nil or autoscrolling() or (book and book.scroll ~= book.target)
+			or images.busy() or #coverqueue > 0 or next(coverwait) ~= nil
 		if drawn and not animating then
 			local exit = handle(love.event.wait())
 			if exit then return exit end

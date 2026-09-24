@@ -36,6 +36,8 @@ To remove everything, delete that symlink (if you made one) and this directory.
     src/lib/layout.lua  line breaking, justification, mixed italic and bold
     src/lib/epub.lua    EPUB 2/3: container → OPF → spine, TOC from nav/NCX
     src/lib/txt.lua     paragraphs, chapter detection, _italics_, Gutenberg cleanup
+    src/lib/images.lua  background image decoding (worker threads) and texture cache
+    src/lib/imgsize.lua reads PNG/JPEG/BMP sizes from headers without decoding
     src/lib/zip.lua     minimal zip reader (stored + deflate via love.data)
     src/lib/xml.lua     forgiving XML/XHTML parser
     src/lib/text.lua    UTF-8 checks, Windows-1252 fallback, HTML entities
