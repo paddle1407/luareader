@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=luareader
+GenericName=Book Reader
+Comment=Read novels in .txt and .epub
+Exec=/home/charlotte/src/luareader/run.sh %f
+Icon=/home/charlotte/src/luareader/luareader.svg
+Terminal=false
+Categories=Office;Viewer;
+Keywords=book;ebook;epub;novel;reader;
+MimeType=application/epub+zip;
