@@ -40,6 +40,7 @@ local families = {
 local defaults = {
 	settings = {
 		size = 20, width = 680, lineheight = 1.55, theme = "dark", font = "notoserif", justify = true,
+		readingmode = "scroll",
 		wpm = 250, fastwpm = 350, automode = "lines", guide = true, guidepos = 35, guidedim = true,
 		comicdir = "ltr", comicfit = "page", comicspread = true,
 		keys = {},
@@ -72,6 +73,8 @@ local comicbusy = false -- a page slide or scroll is running in the comic view
 local settle = 0 -- seconds to keep drawing after window changes (see syncsize)
 local debuglog = os.getenv("LUAREADER_DEBUG") ~= nil
 local drag -- mouse drag in the comic view: { x, y, moved }
+local wheelpages = 0 -- fractional wheel steps accumulated in page mode
+local customfonts = {}
 
 local function theme() return themes[state.settings.theme] or themes.dark end
 
@@ -89,6 +92,21 @@ local function font(name, size)
 	return lg.newFont("fonts/" .. name .. ".ttf", size, "light")
 end
 
+local function customfont(name, size)
+	return lg.newFont("customfonts/" .. name, size, "light")
+end
+
+local function refreshcustomfonts()
+	customfonts = {}
+	love.filesystem.createDirectory("customfonts")
+	for _, name in ipairs(love.filesystem.getDirectoryItems("customfonts")) do
+		if name:lower():match("%.ttf$") or name:lower():match("%.otf$") then
+			customfonts[#customfonts + 1] = name
+		end
+	end
+	table.sort(customfonts)
+end
+
 local function family(id)
 	for _, f in ipairs(families) do
 		if f.id == id then return f end
@@ -100,15 +118,31 @@ local function loadfonts()
 	local s = state.settings.size
 	local hs = floor(s * 1.45 + 0.5)
 	local f = family(state.settings.font).file
-	fonts.body = {
-		r = font(f .. "-Regular", s), i = font(f .. "-Italic", s),
-		b = font(f .. "-Bold", s), bi = font(f .. "-BoldItalic", s),
-	}
-	fonts.head = {
-		r = font(f .. "-Regular", hs), i = font(f .. "-Italic", hs),
-		b = font(f .. "-Bold", hs), bi = font(f .. "-BoldItalic", hs),
-	}
-	fonts.fast = font(f .. "-Regular", floor(s * 2.4 + 0.5))
+	local custom = state.settings.font:match("^custom:(.+)$")
+	local function face(style, size)
+		return font(f .. "-" .. style, size)
+	end
+	local ok, body, head, fast = pcall(function()
+		if custom then
+			local b = customfont(custom, s)
+			local h = customfont(custom, hs)
+			return { r = b, i = b, b = b, bi = b }, { r = h, i = h, b = h, bi = h },
+				customfont(custom, floor(s * 2.4 + 0.5))
+		end
+		return {
+			r = face("Regular", s), i = face("Italic", s),
+			b = face("Bold", s), bi = face("BoldItalic", s),
+		}, {
+			r = face("Regular", hs), i = face("Italic", hs),
+			b = face("Bold", hs), bi = face("BoldItalic", hs),
+		}, face("Regular", floor(s * 2.4 + 0.5))
+	end)
+	if not ok then
+		if not custom then error(body) end
+		state.settings.font = "notoserif"
+		return loadfonts()
+	end
+	fonts.body, fonts.head, fonts.fast = body, head, fast
 	if not fonts.ui then
 		fonts.ui = font("NotoSans-Regular", 13)
 		fonts.label = font("NotoSans-Regular", 15)
@@ -141,8 +175,22 @@ local function maxscroll()
 	return book.lastpage or 0
 end
 
+local function pageindex(y)
+	local pages = book.pages
+	local lo, hi = 1, #pages
+	while lo < hi do
+		local mid = floor((lo + hi + 1) / 2)
+		if pages[mid] <= y + 0.5 then lo = mid else hi = mid - 1 end
+	end
+	return lo
+end
+
 local function settarget(y, instant)
 	book.target = clamp(y, 0, maxscroll())
+	if state.settings.readingmode == "page" and book.pages then
+		book.target = book.pages[pageindex(book.target)]
+		instant = true
+	end
 	if instant then book.scroll = book.target end
 end
 
@@ -231,11 +279,13 @@ local function relayout()
 		if line and line.y > (ys[#ys] or -1) then ys[#ys + 1] = line.y end
 	end
 
-	local y = book.chapterys[#book.chapterys] or 0
+	book.pages = { 0 }
+	local y = 0
 	for _ = 1, #laid.lines do
 		local n = pageafter(y)
 		if not n then break end
 		y = n
+		book.pages[#book.pages + 1] = y
 	end
 	book.lastpage = y
 
@@ -252,6 +302,10 @@ local function relayout()
 end
 
 local function nextpage()
+	if state.settings.readingmode == "page" then
+		settarget(book.pages[min(#book.pages, pageindex(book.target) + 1)])
+		return
+	end
 	local n = pageafter(book.target)
 	settarget(n or maxscroll())
 end
@@ -259,6 +313,10 @@ end
 -- Walks forward from the current chapter's start, so going back lands on the
 -- same page boundaries as going forward (and on a chapter's last page).
 local function prevpage()
+	if state.settings.readingmode == "page" then
+		settarget(book.pages[max(1, pageindex(book.target) - 1)])
+		return
+	end
 	local t = book.target
 	local y = chapterstarty(t - 1)
 	while true do
@@ -270,6 +328,10 @@ local function prevpage()
 end
 
 local function scrolllines(n)
+	if state.settings.readingmode == "page" then
+		if n > 0 then nextpage() else prevpage() end
+		return
+	end
 	local lines = book.laid.lines
 	local lh = bodylh()
 	local i = layout.lineat(lines, book.target + n * lh + lh / 2)
@@ -437,6 +499,7 @@ local function openbook(path)
 	if book and book.doc.close then book.doc.close() end
 	images.clear()
 	book = { path = path, doc = doc, scroll = 0, target = 0 }
+	wheelpages = 0
 	auto.on, auto.paused, fast.on = false, false, false
 
 	local entry = state.books[path] or {}
@@ -470,6 +533,7 @@ local function closebook()
 	if book.doc.close then book.doc.close() end
 	images.clear()
 	book = nil
+	wheelpages = 0
 	auto.on, auto.paused, fast.on = false, false, false
 	screen, overlay = "library", nil
 	love.window.setTitle("luareader")
@@ -509,6 +573,34 @@ local function setfont(id)
 	state.settings.font = id
 	loadfonts()
 	relayout()
+end
+
+local function setreadingmode(id)
+	state.settings.readingmode = id
+	wheelpages = 0
+	if id == "page" then
+		auto.on, auto.paused, auto.line, auto.anim = false, false, nil, nil
+	end
+	if book and not book.doc.comic then settarget(book.target, true) end
+end
+
+local function importfont(path)
+	local name = path:match("([^/\\]+)$") or path
+	if not (name:lower():match("%.ttf$") or name:lower():match("%.otf$")) then return false end
+	local data, err = readfile(path)
+	if not data then showtoast("Could not read font: " .. tostring(err)); return true end
+	local ok = pcall(function()
+		local fd = love.filesystem.newFileData(data, name)
+		lg.newFont(fd, state.settings.size)
+	end)
+	if not ok then showtoast("Unsupported font file"); return true end
+	local saved = love.filesystem.write("customfonts/" .. name, data)
+	if not saved then showtoast("Could not save font"); return true end
+	refreshcustomfonts()
+	setfont("custom:" .. name)
+	save()
+	showtoast("Font imported: " .. name)
+	return true
 end
 
 local function setjustify(on)
@@ -657,6 +749,10 @@ end
 
 local function toggleautoscroll()
 	if not book or book.doc.comic then return end
+	if state.settings.readingmode == "page" then
+		showtoast("Switch to Scroll view for auto-scroll")
+		return
+	end
 	if auto.on then autostop() else autostart() end
 end
 
@@ -857,20 +953,23 @@ local function drawguide(x0)
 	lg.rectangle("fill", x0 - 16, gy + 6, 3, lh - 12, 1.5, 1.5)
 end
 
-local function drawreader()
+local function drawreadercontent(scroll)
 	local th = theme()
 	local laid = book.laid
 	local x0 = floor((W - book.colw) / 2)
-	local scroll = floor(book.scroll + 0.5)
 	local lines = laid.lines
 
-	-- Text is clipped at the top edge and fades out just past the bottom edge.
-	local bottom = H - MARGIN_BOTTOM + FADE
+	-- In page mode, stop at the next page boundary, including short chapter pages.
+	local paged = state.settings.readingmode == "page"
+	local pageend = paged and book.pages[pageindex(scroll) + 1]
+	local bottom = paged and H - MARGIN_BOTTOM or H - MARGIN_BOTTOM + FADE
+	if pageend then bottom = min(bottom, MARGIN_TOP + pageend - scroll) end
 	lg.setScissor(0, MARGIN_TOP, W, bottom - MARGIN_TOP)
 
 	local i = layout.lineat(lines, scroll - 200) or 1
 	for li = i, #lines do
 		local line = lines[li]
+		if pageend and line.y >= pageend then break end
 		local y = MARGIN_TOP + line.y - scroll
 		if y > bottom then break end
 		if y + line.h > MARGIN_TOP then
@@ -917,11 +1016,20 @@ local function drawreader()
 		if line.y > scroll + vh * 2 then break end
 		if line.image then bookimage(line.image) end
 	end
-	for s = 0, FADE - 1 do
-		color(th.bg, (s + 1) / FADE)
-		lg.rectangle("fill", 0, bottom - FADE + s, W, 1)
+	if not paged then
+		for s = 0, FADE - 1 do
+			color(th.bg, (s + 1) / FADE)
+			lg.rectangle("fill", 0, bottom - FADE + s, W, 1)
+		end
 	end
 	lg.setScissor()
+
+end
+
+local function drawreader()
+	local th = theme()
+	local x0 = floor((W - book.colw) / 2)
+	drawreadercontent(book.scroll)
 
 	-- Header: book title. Footer: chapter, progress bar, percentage.
 	lg.setFont(fonts.ui)
@@ -930,7 +1038,9 @@ local function drawreader()
 	lg.printf(title, 0, 24, W, "center")
 
 	local chapter = book.doc.chapters[chapterindex()]
-	local pct = floor(progress() * 100 + 0.5) .. "%"
+	local pct = state.settings.readingmode == "page"
+		and (pageindex(book.target) .. " / " .. #book.pages)
+		or (floor(progress() * 100 + 0.5) .. "%")
 	local fy = H - 36
 	lg.print(ellipsize(fonts.ui, chapter and chapter.title or "", book.colw - 60), x0, fy)
 	lg.printf(pct, x0, fy, book.colw, "right")
@@ -1162,6 +1272,7 @@ local function settingrow(x, y, w, label, sub)
 end
 
 local function drawreadingtab(x, y, w)
+	local y0 = y
 	local s = state.settings
 	local xr = x + w
 	local th = {}
@@ -1173,6 +1284,15 @@ local function drawreadingtab(x, y, w)
 	for _, f in ipairs(families) do fams[#fams + 1] = { id = f.id, label = f.label, font = fonts.preview[f.id] } end
 	ui.segmented(xr, settingrow(x, y, w, "Font"), fams, s.font, setfont)
 	y = y + ROW
+	for _, name in ipairs(customfonts) do
+		settingrow(x, y, w, "Custom font")
+		local id = "custom:" .. name
+		ui.button(xr - 210, y + 9, 210, 34, ellipsize(fonts.ui, name, 188),
+			function() setfont(id) end, { active = s.font == id })
+		y = y + ROW
+	end
+	ui.text("Drop a .ttf or .otf file on the window to add a font", x, y + 4, fonts.ui, theme().dim)
+	y = y + 34
 
 	ui.stepper(xr, settingrow(x, y, w, "Text size"), tostring(s.size),
 		function() setsize(-1, true) end, function() setsize(1, true) end)
@@ -1185,6 +1305,10 @@ local function drawreadingtab(x, y, w)
 	y = y + ROW
 	ui.toggle(xr, settingrow(x, y, w, "Justify text", "Even right edge, like a printed book"), s.justify,
 		function() setjustify(not s.justify) end)
+	y = y + ROW
+	ui.segmented(xr, settingrow(x, y, w, "Text view", "Page mode shows one discrete page at a time"), {
+		{ id = "scroll", label = "Scroll" }, { id = "page", label = "Book pages" },
+	}, s.readingmode, setreadingmode)
 	y = y + ROW + 20
 
 	ui.text("COMICS", x, y, fonts.ui, theme().dim)
@@ -1199,7 +1323,7 @@ local function drawreadingtab(x, y, w)
 	y = y + ROW
 	ui.toggle(xr, settingrow(x, y, w, "Two-page spreads", "Side by side when the window is wide"), s.comicspread,
 		function() s.comicspread = not s.comicspread; relayout() end)
-	return ROW * 9 + 42
+	return y - y0 + ROW
 end
 
 local function drawautotab(x, y, w)
@@ -1367,6 +1491,8 @@ end
 
 function love.load(args)
 	state = store.load(defaults)
+	if state.settings.readingmode ~= "page" then state.settings.readingmode = "scroll" end
+	refreshcustomfonts()
 	keys.normalize(state.settings.keys)
 	keymap = keys.map(state.settings.keys)
 	W, H = lg.getDimensions()
@@ -1461,6 +1587,8 @@ function love.update(dt)
 		if auto.on then
 			if screen == "reader" and not overlay then updateauto(dt) end
 			book.scroll = book.target
+		elseif state.settings.readingmode == "page" then
+			book.scroll = book.target
 		else
 			local d = book.target - book.scroll
 			if abs(d) < 0.5 then
@@ -1535,7 +1663,8 @@ function love.quit()
 end
 
 function love.filedropped(file)
-	openbook(file:getFilename())
+	local path = file:getFilename()
+	if not importfont(path) then openbook(path) end
 end
 
 function love.textinput(t)
@@ -1684,7 +1813,13 @@ function love.wheelmoved(_, y)
 	elseif screen == "reader" and book and auto.on then
 		autostep(y > 0 and -1 or 1)
 	elseif screen == "reader" and book then
-		scrolllines(-y * 3)
+		if state.settings.readingmode == "page" then
+			wheelpages = wheelpages + y
+			while wheelpages >= 1 do prevpage(); wheelpages = wheelpages - 1 end
+			while wheelpages <= -1 do nextpage(); wheelpages = wheelpages + 1 end
+		else
+			settarget(book.target - y * bodylh() * 2.5)
+		end
 	elseif screen == "library" then
 		libsel = max(1, libsel - y)
 	end

@@ -10,6 +10,17 @@ Or drop a file onto the window. The cog (top right, or `s`) opens settings:
 reading options, auto-scroll and the reading guide, and key bindings. `?` jumps
 straight to the keys.
 
+Mouse wheel and trackpad scrolling move through text smoothly, including partial
+wheel steps. In Reading settings, **Text view → Book pages** switches TXT and EPUB
+books to one page at a time. Wheel, arrow keys, page keys, and clicks turn whole
+pages without vertical scrolling. The footer shows the current page and total;
+the page count adapts when the window or text layout changes. Scroll view remains
+the default and is used for auto-scroll.
+
+Drop a `.ttf` or `.otf` font file onto the window to import it. Imported fonts
+appear in Reading settings and are stored in `.data/share/love/luareader/customfonts/`.
+A single imported font file is used for regular, italic, and bold text.
+
 If the window looks wrong (content cut off or squeezed into a corner), run
 `LUAREADER_DEBUG=1 ./run.sh` from a terminal: it prints the window sizes the
 app sees, which helps track down display-scaling issues.
